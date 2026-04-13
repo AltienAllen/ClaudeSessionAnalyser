@@ -317,19 +317,19 @@ function parseSessionTree(filePath) {
           const input = block.input || {};
           let summary = "";
           if (block.name === "Agent") {
-            summary = input.description || input.prompt?.slice(0, 50) || "";
+            summary = input.description || input.prompt?.slice(0, 80) || "";
           } else if (block.name === "Read" || block.name === "Write" || block.name === "Edit") {
-            summary = input.file_path || input.path || "";
-            if (summary.length > 60) summary = "..." + summary.slice(-57);
+            const fp = input.file_path || input.path || "";
+            summary = fp ? basename(fp) : "";
           } else if (block.name === "Bash") {
-            summary = (input.command || "").slice(0, 60);
+            summary = input.command || "";
           } else if (block.name === "Grep" || block.name === "Glob") {
             summary = input.pattern || "";
           } else if (block.name === "Skill") {
             summary = input.skill || "";
           } else {
             const keys = Object.keys(input);
-            if (keys.length > 0) summary = keys.slice(0, 2).join(", ");
+            if (keys.length > 0) summary = keys.slice(0, 3).join(", ");
           }
           toolUseIdToInfo[block.id] = { name: block.name, summary };
         }
@@ -359,10 +359,10 @@ function parseSessionTree(filePath) {
               // Extract short result for display
               let resultSnippet = "";
               if (isError) {
-                if (typeof block.content === "string") resultSnippet = block.content.slice(0, 80);
+                if (typeof block.content === "string") resultSnippet = block.content.split("\n")[0];
                 else if (Array.isArray(block.content)) {
                   const txt = block.content.find((b) => b.type === "text");
-                  if (txt) resultSnippet = txt.text.slice(0, 80);
+                  if (txt) resultSnippet = txt.text.split("\n")[0];
                 }
               }
               currentTurn.toolResults.push({
@@ -443,8 +443,9 @@ function renderSessionTree(turns, opts = {}) {
     const isLast = i === limited.length - 1;
     const corrFlag = t.isCorrection ? red(" CORRECTION") : "";
 
-    // User prompt line
-    console.log(`${green("Q:")} ${dim(`[${time}]`)} ${truncate(t.prompt, 80)}${corrFlag}`);
+    // User prompt line — first line of prompt, no truncation
+    const promptLine = t.prompt.replace(/\n/g, " ").replace(/\s+/g, " ");
+    console.log(`${green("Q:")} ${dim(`[${time}]`)} ${promptLine}${corrFlag}`);
 
     // Build ordered list of tool calls with their results
     const resultByToolId = {};
@@ -473,10 +474,9 @@ function renderSessionTree(turns, opts = {}) {
       if (item.type === "tool") {
         const statusIcon = item.result?.isError ? red("✗") : green("✓");
         const status = item.result ? ` ${statusIcon}` : "";
-        const summaryText = item.summary ? dim(` ${truncate(item.summary, 50)}`) : "";
+        const summaryText = item.summary ? dim(` ${item.summary}`) : "";
 
         if (item.isAgent) {
-          // Agent calls get special rendering
           console.log(`${dim(connector)} ${magenta("Agent")}: ${cyan(item.agentDesc || "?")}${status}`);
         } else {
           console.log(`${dim(connector)} ${yellow(item.name)}${summaryText}${status}`);
@@ -484,10 +484,12 @@ function renderSessionTree(turns, opts = {}) {
 
         // Show error details inline
         if (item.result?.isError && item.result.resultSnippet) {
-          console.log(`${dim(prefix)} ${red(truncate(item.result.resultSnippet, 70))}`);
+          console.log(`${dim(prefix)} ${red(item.result.resultSnippet)}`);
         }
       } else if (item.type === "response") {
-        console.log(`${dim(connector)} ${cyan("→")} ${dim(truncate(item.text, 75))}`);
+        // Show first meaningful line of response, no truncation
+        const respLine = item.text.replace(/\n/g, " ").replace(/\s+/g, " ");
+        console.log(`${dim(connector)} ${cyan("→")} ${dim(respLine)}`);
       }
     }
 
