@@ -1,0 +1,26 @@
+{
+  "name": "claude-session-analyser",
+  "version": "1.0.0",
+  "description": "Compress and structure Claude Code session logs for agent-driven analysis",
+  "main": "index.js",
+  "bin": {
+    "claude-session-analyser": "./index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "session-analysis",
+    "agent-wiki",
+    "cli"
+  ],
+  "author": "Allen Morgan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AltienAllen/ClaudeSessionAnalyser.git"
+  }
+}
