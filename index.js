@@ -295,6 +295,211 @@ function parseSessionRich(filePath) {
   return result;
 }
 
+// ── Tree parser for session detail ──────────────────────────────────
+function parseSessionTree(filePath) {
+  const raw = readFileSync(filePath, "utf8");
+  const lines = raw.split("\n").filter(Boolean);
+
+  const entries = [];
+  for (const line of lines) {
+    try { entries.push(JSON.parse(line)); } catch { continue; }
+  }
+
+  // Build lookup maps
+  const byUuid = {};
+  const toolUseIdToInfo = {};  // tool_use block id → { name, input summary }
+
+  for (const obj of entries) {
+    if (obj.uuid) byUuid[obj.uuid] = obj;
+    if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+      for (const block of obj.message.content) {
+        if (block.type === "tool_use" && block.id) {
+          const input = block.input || {};
+          let summary = "";
+          if (block.name === "Agent") {
+            summary = input.description || input.prompt?.slice(0, 50) || "";
+          } else if (block.name === "Read" || block.name === "Write" || block.name === "Edit") {
+            summary = input.file_path || input.path || "";
+            if (summary.length > 60) summary = "..." + summary.slice(-57);
+          } else if (block.name === "Bash") {
+            summary = (input.command || "").slice(0, 60);
+          } else if (block.name === "Grep" || block.name === "Glob") {
+            summary = input.pattern || "";
+          } else if (block.name === "Skill") {
+            summary = input.skill || "";
+          } else {
+            const keys = Object.keys(input);
+            if (keys.length > 0) summary = keys.slice(0, 2).join(", ");
+          }
+          toolUseIdToInfo[block.id] = { name: block.name, summary };
+        }
+      }
+    }
+  }
+
+  // Build conversation tree: group into "turns"
+  // A turn starts with a user text prompt (not a tool_result)
+  const turns = [];
+  let currentTurn = null;
+
+  for (const obj of entries) {
+    if (obj.type === "user") {
+      const content = obj.message?.content;
+      if (!content) continue;
+      if (Array.isArray(content)) {
+        const hasToolResult = content.some((b) => b.type === "tool_result");
+        if (hasToolResult) {
+          // Attach tool results to current turn
+          if (currentTurn) {
+            for (const block of content) {
+              if (block.type !== "tool_result") continue;
+              const toolId = block.tool_use_id;
+              const info = toolUseIdToInfo[toolId] || { name: "unknown", summary: "" };
+              const isError = block.is_error === true;
+              // Extract short result for display
+              let resultSnippet = "";
+              if (isError) {
+                if (typeof block.content === "string") resultSnippet = block.content.slice(0, 80);
+                else if (Array.isArray(block.content)) {
+                  const txt = block.content.find((b) => b.type === "text");
+                  if (txt) resultSnippet = txt.text.slice(0, 80);
+                }
+              }
+              currentTurn.toolResults.push({
+                toolId,
+                name: info.name,
+                summary: info.summary,
+                isError,
+                resultSnippet,
+              });
+            }
+          }
+          continue;
+        }
+        // User text prompt — start new turn
+        const textParts = content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+        const cleaned = textParts.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+          .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, "")
+          .replace(/<local-command-[\s\S]*?<\/local-command-[^>]*>/g, "").trim();
+        if (!cleaned) continue;
+        if (currentTurn) turns.push(currentTurn);
+        currentTurn = {
+          prompt: cleaned,
+          timestamp: obj.timestamp ? new Date(obj.timestamp) : null,
+          toolCalls: [],
+          toolResults: [],
+          assistantTexts: [],
+          isCorrection: isCorrection(cleaned),
+        };
+      } else if (typeof content === "string") {
+        const cleaned = content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+          .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, "")
+          .replace(/<local-command-[\s\S]*?<\/local-command-[^>]*>/g, "").trim();
+        if (!cleaned) continue;
+        if (currentTurn) turns.push(currentTurn);
+        currentTurn = {
+          prompt: cleaned,
+          timestamp: obj.timestamp ? new Date(obj.timestamp) : null,
+          toolCalls: [],
+          toolResults: [],
+          assistantTexts: [],
+          isCorrection: isCorrection(cleaned),
+        };
+      }
+    } else if (obj.type === "assistant" && currentTurn) {
+      const content = obj.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block.type === "tool_use") {
+          const info = toolUseIdToInfo[block.id] || { name: block.name, summary: "" };
+          currentTurn.toolCalls.push({
+            id: block.id,
+            name: info.name,
+            summary: info.summary,
+            isAgent: block.name === "Agent",
+            agentDesc: block.name === "Agent" ? (block.input?.description || "") : null,
+          });
+        } else if (block.type === "text" && block.text) {
+          const cleaned = block.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+          if (cleaned.length > 10) {
+            currentTurn.assistantTexts.push(cleaned);
+          }
+        }
+      }
+    }
+  }
+  if (currentTurn) turns.push(currentTurn);
+
+  return turns;
+}
+
+function renderSessionTree(turns, opts = {}) {
+  const limit = opts.limit || 30;
+  const limited = turns.slice(0, limit);
+
+  for (let i = 0; i < limited.length; i++) {
+    const t = limited[i];
+    const time = fmtTime(t.timestamp);
+    const isLast = i === limited.length - 1;
+    const corrFlag = t.isCorrection ? red(" CORRECTION") : "";
+
+    // User prompt line
+    console.log(`${green("Q:")} ${dim(`[${time}]`)} ${truncate(t.prompt, 80)}${corrFlag}`);
+
+    // Build ordered list of tool calls with their results
+    const resultByToolId = {};
+    for (const tr of t.toolResults) {
+      resultByToolId[tr.toolId] = tr;
+    }
+
+    // Collect items to display: tool calls + final assistant text
+    const items = [];
+    for (const tc of t.toolCalls) {
+      const result = resultByToolId[tc.id];
+      items.push({ type: "tool", ...tc, result });
+    }
+    // Add assistant response summary if there is one
+    if (t.assistantTexts.length > 0) {
+      const lastText = t.assistantTexts[t.assistantTexts.length - 1];
+      items.push({ type: "response", text: lastText });
+    }
+
+    for (let j = 0; j < items.length; j++) {
+      const item = items[j];
+      const isItemLast = j === items.length - 1;
+      const connector = isItemLast ? "└─" : "├─";
+      const prefix = isItemLast ? "   " : "│  ";
+
+      if (item.type === "tool") {
+        const statusIcon = item.result?.isError ? red("✗") : green("✓");
+        const status = item.result ? ` ${statusIcon}` : "";
+        const summaryText = item.summary ? dim(` ${truncate(item.summary, 50)}`) : "";
+
+        if (item.isAgent) {
+          // Agent calls get special rendering
+          console.log(`${dim(connector)} ${magenta("Agent")}: ${cyan(item.agentDesc || "?")}${status}`);
+        } else {
+          console.log(`${dim(connector)} ${yellow(item.name)}${summaryText}${status}`);
+        }
+
+        // Show error details inline
+        if (item.result?.isError && item.result.resultSnippet) {
+          console.log(`${dim(prefix)} ${red(truncate(item.result.resultSnippet, 70))}`);
+        }
+      } else if (item.type === "response") {
+        console.log(`${dim(connector)} ${cyan("→")} ${dim(truncate(item.text, 75))}`);
+      }
+    }
+
+    // Empty line between turns (unless it's the last)
+    if (!isLast) console.log("");
+  }
+
+  if (turns.length > limit) {
+    console.log(dim(`\n  ... ${turns.length - limit} more turns. Use --limit ${turns.length}.`));
+  }
+}
+
 // ── Sessions index fast path ────────────────────────────────────────
 function loadSessionsIndex(projectDir) {
   const indexPath = join(projectDir, "sessions-index.json");
@@ -524,6 +729,7 @@ function cmdSessionDetail(args) {
   }
 
   const s = parseSessionRich(targetFile);
+  const treeTurns = parseSessionTree(targetFile);
 
   if (args.json) {
     console.log(JSON.stringify({
@@ -539,10 +745,12 @@ function cmdSessionDetail(args) {
       corrections: s.corrections.map((c) => ({ text: truncate(c.text, 150), timestamp: c.timestamp?.toISOString() })),
       failedTools: s.failedTools.map((f) => ({ tool: f.toolName, error: f.error, timestamp: f.timestamp?.toISOString() })),
       topFiles: Object.entries(s.filesTouched).sort((a, b) => b[1] - a[1]).slice(0, 15),
-      turns: s.turns.map((t) => ({
-        time: fmtTime(t.timestamp), prompt: truncate(t.userPrompt, 100),
-        tools: summarizeToolCalls(t.toolCalls), isCorrection: t.isCorrection,
-        followedByCorrection: t.followedByCorrection || false,
+      turns: treeTurns.map((t) => ({
+        time: fmtTime(t.timestamp), prompt: truncate(t.prompt, 100),
+        isCorrection: t.isCorrection,
+        toolCalls: t.toolCalls.map((tc) => ({ name: tc.name, summary: tc.summary, isAgent: tc.isAgent })),
+        toolResults: t.toolResults.map((tr) => ({ name: tr.name, isError: tr.isError, snippet: tr.resultSnippet })),
+        response: t.assistantTexts.length > 0 ? truncate(t.assistantTexts[t.assistantTexts.length - 1], 120) : null,
       })),
     }, null, 2));
     return;
@@ -552,24 +760,11 @@ function cmdSessionDetail(args) {
   const corrRate = s.turns.length > 0 ? (s.corrections.length / s.turns.length * 100).toFixed(0) : 0;
   console.log(bold(`\n== Session: ${cyan(s.id.slice(0, 8))} ==`));
   console.log(dim(`"${title}"`));
-  console.log(`${fmtDate(s.firstTimestamp)} to ${fmtDate(s.lastTimestamp)} | Branch: ${green(s.gitBranch || "?")} | ${s.turns.length} turns | ${s.corrections.length} corrections (${corrRate}%) | ${s.apiErrors} API errors`);
+  console.log(`${fmtDate(s.firstTimestamp)} to ${fmtDate(s.lastTimestamp)} | Branch: ${green(s.gitBranch || "?")} | ${treeTurns.length} turns | ${s.corrections.length} corrections (${corrRate}%) | ${s.apiErrors} API errors`);
 
-  // Narrative
-  console.log(bold("\n### Turn-by-turn narrative\n"));
-  const limited = args.limit ? s.turns.slice(0, args.limit) : s.turns;
-  for (let i = 0; i < limited.length; i++) {
-    const t = limited[i];
-    const time = fmtTime(t.timestamp);
-    const prompt = truncate(t.userPrompt, 70);
-    const tools = t.toolCalls.length > 0 ? dim(` → ${summarizeToolCalls(t.toolCalls)}`) : "";
-    const corrFlag = t.isCorrection ? red(" ← CORRECTION") : "";
-    const precededFlag = t.followedByCorrection ? yellow(" ⚠") : "";
-    const num = String(i + 1).padStart(3);
-    console.log(`${dim(num)}. ${dim(`[${time}]`)} ${prompt}${tools}${corrFlag}${precededFlag}`);
-  }
-  if (s.turns.length > limited.length) {
-    console.log(dim(`  ... ${s.turns.length - limited.length} more turns. Use --limit ${s.turns.length}.`));
-  }
+  // Conversation tree
+  console.log(bold("\n### Conversation tree\n"));
+  renderSessionTree(treeTurns, { limit: args.limit });
 
   // Tool summary
   const toolTotal = Object.values(s.toolCounts).reduce((a, b) => a + b, 0);
