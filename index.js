@@ -317,12 +317,14 @@ function parseSessionTree(filePath) {
           const input = block.input || {};
           let summary = "";
           if (block.name === "Agent") {
-            summary = input.description || input.prompt?.slice(0, 80) || "";
+            summary = input.description || input.prompt?.split("\n")[0].slice(0, 80) || "";
           } else if (block.name === "Read" || block.name === "Write" || block.name === "Edit") {
             const fp = input.file_path || input.path || "";
             summary = fp ? basename(fp) : "";
           } else if (block.name === "Bash") {
-            summary = input.command || "";
+            // Use description if available, otherwise first line of command
+            const cmd = input.command || "";
+            summary = input.description || cmd.split("\n")[0];
           } else if (block.name === "Grep" || block.name === "Glob") {
             summary = input.pattern || "";
           } else if (block.name === "Skill") {
@@ -443,8 +445,8 @@ function renderSessionTree(turns, opts = {}) {
     const isLast = i === limited.length - 1;
     const corrFlag = t.isCorrection ? red(" CORRECTION") : "";
 
-    // User prompt line — first line of prompt, no truncation
-    const promptLine = t.prompt.replace(/\n/g, " ").replace(/\s+/g, " ");
+    // User prompt — first line only
+    const promptLine = t.prompt.split("\n")[0].replace(/\s+/g, " ");
     console.log(`${green("Q:")} ${dim(`[${time}]`)} ${promptLine}${corrFlag}`);
 
     // Build ordered list of tool calls with their results
