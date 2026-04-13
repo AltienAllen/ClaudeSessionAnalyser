@@ -487,8 +487,10 @@ function renderSessionTree(turns, opts = {}) {
           console.log(`${dim(prefix)} ${red(item.result.resultSnippet)}`);
         }
       } else if (item.type === "response") {
-        // Show first meaningful line of response, no truncation
-        const respLine = item.text.replace(/\n/g, " ").replace(/\s+/g, " ");
+        // Response summary — first sentence or 150 chars, whichever is shorter
+        const flat = item.text.replace(/\n/g, " ").replace(/\s+/g, " ");
+        const firstSentence = flat.match(/^.{20,}?[.!?]\s/);
+        const respLine = firstSentence ? firstSentence[0].trim() : truncate(flat, 150);
         console.log(`${dim(connector)} ${cyan("→")} ${dim(respLine)}`);
       }
     }
